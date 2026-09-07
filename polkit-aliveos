@@ -99,7 +99,6 @@ def create_dim_overlay(dim_pct=65):
     """Creates a translucent full-screen backdrop using Cairo drawing with configurable opacity."""
     dimmer = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
     dimmer.set_title("polkit-aliveos-dimmer")
-    dimmer.set_wmclass("polkit-aliveos-dimmer", "polkit-aliveos-dimmer")
     dimmer.set_decorated(False)
     dimmer.set_skip_taskbar_hint(True)
     dimmer.set_skip_pager_hint(True)
@@ -188,11 +187,10 @@ class AuthDialog(Gtk.MessageDialog):
         self.connect("key-press-event", self.on_key_press)
 
     def on_key_press(self, widget, event):
-        if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
-            if event.keyval == Gdk.KEY_BackSpace and self.entry_pass.has_focus() and len(self.entry_pass.get_text()) > 0:
-                return False
+        if event.keyval == Gdk.KEY_Escape:
             self.response(Gtk.ResponseType.CANCEL)
             return True
+        # Never close dialog on BackSpace - allow normal text editing
         return False
 
     def build_ui(self):
@@ -212,14 +210,16 @@ class AuthDialog(Gtk.MessageDialog):
             exe_display = self.caller_exe or self.caller_cmd or "System / Service Daemon"
             lbl_exe = Gtk.Label()
             lbl_exe.set_markup(f"<b>Application:</b> <tt>{GLib.markup_escape_text(exe_display)}</tt>")
-            lbl_exe.set_alignment(0.0, 0.5)
+            lbl_exe.set_xalign(0.0)
+            lbl_exe.set_yalign(0.5)
             lbl_exe.set_line_wrap(True)
             lbl_exe.set_selectable(True)
             frame_box.pack_start(lbl_exe, False, False, 0)
 
             lbl_act = Gtk.Label()
             lbl_act.set_markup(f"<b>Action:</b> <small><tt>{GLib.markup_escape_text(self.action_id)}</tt></small>")
-            lbl_act.set_alignment(0.0, 0.5)
+            lbl_act.set_xalign(0.0)
+            lbl_act.set_yalign(0.5)
             lbl_act.set_line_wrap(True)
             lbl_act.set_selectable(True)
             frame_box.pack_start(lbl_act, False, False, 0)
@@ -366,7 +366,8 @@ class AliveosPolkitListener(PolkitAgent.Listener):
                 session.cancel()
                 dlg.destroy()
                 if not task.get_completed():
-                    task.return_new_error(GLib.quark_from_string("polkit-error-quark"), 0, "Authentication cancelled")
+                    err = GLib.Error.new_literal(GLib.quark_from_string("polkit-error-quark"), "Authentication cancelled", 0)
+                    task.return_error(err)
 
         dialog.connect("response", on_response)
 def run_test_dialog():
