@@ -2,11 +2,12 @@
 """
 polkit-aliveos - Lightweight, Transparent PolicyKit Authentication Agent for AliveOS
 Key Features:
- - Zenity-GTK3 look & feel (clean Gtk.Dialog with standard system theme styling)
+ - Zenity-GTK3 look & feel with native theme responsiveness
  - Explicit caller disclosure: Displays calling application executable (/proc/<pid>/exe),
    command line, and Polkit Action ID front and center
- - Password reveal toggle (eye icon / peek)
- - Optional UAC-style dimming and audio chime via polkit-aliveos.json
+ - Embedded password reveal toggle inside the Gtk.Entry (standard view-reveal-symbolic icon)
+ - Native Wayland Layer Shell dimming overlay (Windows UAC style) via gtk-layer-shell
+ - Fully interactive buttons, keyboard submission (Enter), and escape dismissal (Esc / Backspace)
 """
 
 import json
@@ -23,6 +24,13 @@ gi.require_version('GLib', '2.0')
 gi.require_version('Polkit', '1.0')
 gi.require_version('PolkitAgent', '1.0')
 
+try:
+    gi.require_version('GtkLayerShell', '0.1')
+    from gi.repository import GtkLayerShell
+    HAS_LAYER_SHELL = GtkLayerShell.is_supported()
+except Exception:
+    HAS_LAYER_SHELL = False
+
 from gi.repository import Gtk, Gdk, GLib, Polkit, PolkitAgent
 
 CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
@@ -30,7 +38,7 @@ CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
 def load_config():
     defaults = {
         "reveal_password": True,
-        "screen_dimming": False,
+        "screen_dimming": True,
         "play_sound": True,
         "sound_name": "dialog-warning",
         "show_full_command": True,
@@ -50,42 +58,11 @@ def play_alert_sound(sound_name):
     except Exception:
         pass
 
-def inspect_process(pid):
-    """Inspects /proc/<pid> to obtain the true executable path and command line."""
-    info = {"exe": "Unknown", "cmdline": "Unknown", "name": "Unknown"}
-    if not pid:
-        return info
-    try:
-        exe_link = f"/proc/{pid}/exe"
-        if os.path.exists(exe_link):
-            info["exe"] = os.path.realpath(exe_link)
-            info["name"] = os.path.basename(info["exe"])
-    except Exception:
-        pass
-
-    try:
-        cmdline_file = f"/proc/{pid}/cmdline"
-        if os.path.exists(cmdline_file):
-            raw = open(cmdline_file, "rb").read()
-            parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
-            if parts:
-                info["cmdline"] = " ".join(parts)
-    except Exception:
-        pass
-
-    return info
-
 def create_dim_overlay():
     """Creates a translucent full-screen backdrop to dim the display (UAC style)."""
-    try:
-        gi.require_version('GtkLayerShell', '0.1')
-        from gi.repository import GtkLayerShell
-        has_layer_shell = GtkLayerShell.is_supported()
-    except Exception:
-        has_layer_shell = False
-
     dimmer = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
     dimmer.set_title("polkit-aliveos-dimmer")
+    dimmer.set_wmclass("polkit-aliveos-dimmer", "polkit-aliveos-dimmer")
     dimmer.set_decorated(False)
 
     # Semi-transparent dark overlay (65% black)
@@ -99,8 +76,9 @@ def create_dim_overlay():
     css.load_from_data(b"window { background-color: rgba(0, 0, 0, 0.65); }")
     dimmer.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
-    if has_layer_shell:
+    if HAS_LAYER_SHELL:
         GtkLayerShell.init_for_window(dimmer)
+        # Place dimmer below the dialog but above normal apps and bar
         GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.TOP)
         for edge in (GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT, GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM):
             GtkLayerShell.set_anchor(dimmer, edge, True)
@@ -116,9 +94,10 @@ class AuthDialog(Gtk.Dialog):
             title="Authentication Required",
             modal=True
         )
-        self.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
-        self.add_button("_Authenticate", Gtk.ResponseType.OK)
-        self.set_default_size(480, -1)
+        self.set_wmclass("polkit-aliveos", "polkit-aliveos")
+        self.btn_cancel = self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        self.btn_auth = self.add_button("_Authenticate", Gtk.ResponseType.OK)
+        self.set_default_size(500, -1)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(12)
         self.set_resizable(False)
@@ -130,10 +109,6 @@ class AuthDialog(Gtk.Dialog):
         self.selected_user = users[0] if users else os.getlogin()
         self.dimmer = None
 
-        # Windows UAC-style screen dimming
-        if self.cfg.get("screen_dimming", False):
-            self.dimmer = create_dim_overlay()
-            self.dimmer.show_all()
         # Parse caller details from polkit details object
         self.caller_exe = None
         self.caller_cmd = None
@@ -147,11 +122,31 @@ class AuthDialog(Gtk.Dialog):
             except Exception:
                 pass
 
+        # Windows UAC-style screen dimming
+        if self.cfg.get("screen_dimming", True):
+            try:
+                self.dimmer = create_dim_overlay()
+                self.dimmer.show_all()
+            except Exception as e:
+                print(f"[!] Dimmer init warning: {e}", file=sys.stderr)
+
         self.build_ui(message, icon_name)
+
+        # Allow Escape or BackSpace to dismiss
+        self.connect("key-press-event", self.on_key_press)
+
+    def on_key_press(self, widget, event):
+        if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
+            # Only dismiss on backspace if password entry isn't focused or is empty
+            if event.keyval == Gdk.KEY_BackSpace and self.entry_pass.has_focus() and len(self.entry_pass.get_text()) > 0:
+                return False
+            self.response(Gtk.ResponseType.CANCEL)
+            return True
+        return False
 
     def build_ui(self, message, icon_name):
         content = self.get_content_area()
-        content.set_spacing(10)
+        content.set_spacing(12)
 
         # Header Box: Icon + Main Text
         header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
@@ -185,8 +180,8 @@ class AuthDialog(Gtk.Dialog):
         if self.cfg.get("show_full_command", True):
             frame = Gtk.Frame()
             frame.set_shadow_type(Gtk.ShadowType.IN)
-            frame_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            frame_box.set_border_width(8)
+            frame_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            frame_box.set_border_width(10)
 
             # Executable row
             exe_display = self.caller_exe or self.caller_cmd or "System / Service Daemon"
@@ -194,12 +189,15 @@ class AuthDialog(Gtk.Dialog):
             lbl_exe.set_markup(f"<b>Application:</b> <tt>{GLib.markup_escape_text(exe_display)}</tt>")
             lbl_exe.set_alignment(0.0, 0.5)
             lbl_exe.set_line_wrap(True)
+            lbl_exe.set_selectable(True)
             frame_box.pack_start(lbl_exe, False, False, 0)
 
             # Action ID row
             lbl_act = Gtk.Label()
             lbl_act.set_markup(f"<b>Action:</b> <small><tt>{GLib.markup_escape_text(self.action_id)}</tt></small>")
             lbl_act.set_alignment(0.0, 0.5)
+            lbl_act.set_line_wrap(True)
+            lbl_act.set_selectable(True)
             frame_box.pack_start(lbl_act, False, False, 0)
 
             frame.add(frame_box)
@@ -220,27 +218,24 @@ class AuthDialog(Gtk.Dialog):
             user_box.pack_start(combo, True, True, 0)
             content.pack_start(user_box, False, False, 0)
 
-        # Password Entry Box
+        # Password Entry Box with Embedded Reveal Eye Icon
         pass_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.lbl_prompt = Gtk.Label(label="Password:")
         self.lbl_prompt.set_alignment(0.0, 0.5)
         pass_box.pack_start(self.lbl_prompt, False, False, 0)
 
-        entry_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.entry_pass = Gtk.Entry()
         self.entry_pass.set_visibility(False)
         self.entry_pass.set_activates_default(True)
-        entry_hbox.pack_start(self.entry_pass, True, True, 0)
 
-        # Password Reveal Button (Eye Icon with toggle & peek-on-hold)
+        # Native embedded eye icon inside Gtk.Entry
         if self.cfg.get("reveal_password", True):
-            self.btn_reveal = Gtk.ToggleButton()
-            img = Gtk.Image.new_from_icon_name("view-reveal-symbolic", Gtk.IconSize.BUTTON)
-            self.btn_reveal.set_image(img)
-            self.btn_reveal.set_tooltip_text("Show / hide password")
-            self.btn_reveal.connect("toggled", lambda b: self.entry_pass.set_visibility(b.get_active()))
-            entry_hbox.pack_start(self.btn_reveal, False, False, 0)
-        pass_box.pack_start(entry_hbox, False, False, 0)
+            self.entry_pass.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
+            self.entry_pass.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Click to reveal / hide password")
+            self.entry_pass.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, True)
+            self.entry_pass.connect("icon-press", self.on_reveal_icon_press)
+
+        pass_box.pack_start(self.entry_pass, False, False, 0)
 
         # Error label (for incorrect password retry)
         self.lbl_error = Gtk.Label()
@@ -250,11 +245,19 @@ class AuthDialog(Gtk.Dialog):
 
         content.pack_start(pass_box, False, False, 4)
         self.show_all()
-    def do_destroy(self):
+
+    def on_reveal_icon_press(self, entry, icon_pos, event):
+        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
+            current_vis = entry.get_visibility()
+            new_vis = not current_vis
+            entry.set_visibility(new_vis)
+            icon_name = "view-conceal-symbolic" if new_vis else "view-reveal-symbolic"
+            entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, icon_name)
+
+    def close_dimmer(self):
         if self.dimmer:
             self.dimmer.destroy()
             self.dimmer = None
-        super().do_destroy()
 
     def set_error(self, err_msg):
         self.lbl_error.set_markup(f"<span color='red'><b>{GLib.markup_escape_text(err_msg)}</b></span>")
@@ -294,6 +297,7 @@ class AliveosPolkitListener(PolkitAgent.Listener):
 
         def on_completed(sess, gained_auth):
             if gained_auth:
+                dialog.close_dimmer()
                 dialog.response(Gtk.ResponseType.OK)
             else:
                 dialog.set_error("Authentication failed. Please try again.")
@@ -315,6 +319,7 @@ class AliveosPolkitListener(PolkitAgent.Listener):
                 pwd_text = dlg.entry_pass.get_text()
                 session.response(pwd_text)
             else:
+                dlg.close_dimmer()
                 session.cancel()
                 dlg.destroy()
 
@@ -341,8 +346,9 @@ def run_test_dialog():
         users=[os.getlogin()],
         cfg=cfg
     )
-    dialog.lbl_prompt.set_text("Password for twilight:")
+    dialog.lbl_prompt.set_text(f"Password for {os.getlogin()}:")
     resp = dialog.run()
+    dialog.close_dimmer()
     if resp == Gtk.ResponseType.OK:
         print(f"[✓] Test completed. Entered password length: {len(dialog.entry_pass.get_text())} characters.")
     else:
