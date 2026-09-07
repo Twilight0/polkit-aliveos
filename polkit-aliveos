@@ -75,6 +75,41 @@ def inspect_process(pid):
 
     return info
 
+def create_dim_overlay():
+    """Creates a translucent full-screen backdrop to dim the display (UAC style)."""
+    try:
+        gi.require_version('GtkLayerShell', '0.1')
+        from gi.repository import GtkLayerShell
+        has_layer_shell = GtkLayerShell.is_supported()
+    except Exception:
+        has_layer_shell = False
+
+    dimmer = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
+    dimmer.set_title("polkit-aliveos-dimmer")
+    dimmer.set_decorated(False)
+
+    # Semi-transparent dark overlay (65% black)
+    screen = dimmer.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual:
+        dimmer.set_visual(visual)
+    dimmer.set_app_paintable(True)
+
+    css = Gtk.CssProvider()
+    css.load_from_data(b"window { background-color: rgba(0, 0, 0, 0.65); }")
+    dimmer.get_style_context().add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    if has_layer_shell:
+        GtkLayerShell.init_for_window(dimmer)
+        GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.TOP)
+        for edge in (GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT, GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM):
+            GtkLayerShell.set_anchor(dimmer, edge, True)
+        GtkLayerShell.set_keyboard_mode(dimmer, GtkLayerShell.KeyboardMode.NONE)
+    else:
+        dimmer.fullscreen()
+
+    return dimmer
+
 class AuthDialog(Gtk.Dialog):
     def __init__(self, action_id, message, icon_name, details, users, cfg):
         super().__init__(
@@ -93,7 +128,12 @@ class AuthDialog(Gtk.Dialog):
         self.action_id = action_id
         self.users = users
         self.selected_user = users[0] if users else os.getlogin()
+        self.dimmer = None
 
+        # Windows UAC-style screen dimming
+        if self.cfg.get("screen_dimming", False):
+            self.dimmer = create_dim_overlay()
+            self.dimmer.show_all()
         # Parse caller details from polkit details object
         self.caller_exe = None
         self.caller_cmd = None
@@ -210,6 +250,11 @@ class AuthDialog(Gtk.Dialog):
 
         content.pack_start(pass_box, False, False, 4)
         self.show_all()
+    def do_destroy(self):
+        if self.dimmer:
+            self.dimmer.destroy()
+            self.dimmer = None
+        super().do_destroy()
 
     def set_error(self, err_msg):
         self.lbl_error.set_markup(f"<span color='red'><b>{GLib.markup_escape_text(err_msg)}</b></span>")
