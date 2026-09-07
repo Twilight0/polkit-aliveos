@@ -115,6 +115,7 @@ class AuthDialog(Gtk.MessageDialog):
 
         # Wayland Layer Shell: Dialog sits on OVERLAY (above the TOP layer dimmer)
         if HAS_LAYER_SHELL and self.cfg.get("screen_dimming", True):
+            GtkLayerShell.init_for_window(self)
             GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
             GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
         else:
