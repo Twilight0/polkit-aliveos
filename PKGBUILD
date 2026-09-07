@@ -10,7 +10,7 @@ depends=('python' 'python-gobject' 'gtk3' 'gtk-layer-shell' 'polkit' 'libcanberr
 provides=('polkit-authentication-agent')
 conflicts=('polkit-gnome')
 source=("https://github.com/Twilight0/polkit-aliveos/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('2a8843e8aad623b0a029766ffcd593e3d887072cbf33728eb714a905004775d1')
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
