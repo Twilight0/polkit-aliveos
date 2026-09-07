@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-polkit-aliveos-config - Configuration Companion Utility for polkit-aliveos
-Provides a clean GTK3 settings dialog matching the Zenity aesthetic to configure:
- - Executable & path disclosure display modes
- - Password reveal toggle (eye icon / peek)
- - UAC-style screen dimming on prompt
- - Sound alert / chime on privilege elevation request
+polkit-aliveos-config - Configuration Companion Utility for polkit-aliveos (GTK3 Zenity style)
+Full parity with qpolkitconfig:
+ - Tab 1: Security & Disclosure (Explicit caller path, prompt timeout spin button)
+ - Tab 2: Prompts & Visuals (Password reveal eye, reveal behavior dropdown, UAC dimming switch, dimming % slider)
+ - Tab 3: Audio & Alerts (Sound toggle, sound file status / preview test)
+ - Bottom Action Area: Test Auth Dialog, Cancel, Apply, OK
 """
 
 import json
 import os
+import subprocess
 import sys
 
 import gi
@@ -17,11 +18,13 @@ gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk
 
 CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
+AGENT_BINARY = "/home/twilight/Projects/polkit-aliveos/polkit-aliveos"
 
 DEFAULT_CONFIG = {
     "reveal_password": True,
-    "reveal_mode": "toggle",      # "toggle" (click to toggle) or "hold" (press & hold)
+    "reveal_mode": "toggle",      # "toggle" or "hold"
     "screen_dimming": True,
+    "dim_percentage": 65,         # 10% - 95% opacity
     "play_sound": True,
     "sound_name": "dialog-warning",
     "show_full_command": True,
@@ -51,34 +54,34 @@ def save_config(cfg):
 class ConfigWindow(Gtk.Dialog):
     def __init__(self):
         super().__init__(
-            title="Authentication Agent Settings",
-            flags=Gtk.DialogFlags.MODAL,
-            buttons=(
-                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                Gtk.STOCK_APPLY, Gtk.ResponseType.APPLY,
-                Gtk.STOCK_OK, Gtk.ResponseType.OK,
-            )
+            title="Authentication & Privilege Security Settings",
+            modal=True
         )
-        self.set_default_size(460, 360)
+        self.btn_test = self.add_button("Test Dialog", 100)
+        self.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+        self.add_button(Gtk.STOCK_APPLY, Gtk.ResponseType.APPLY)
+        self.add_button(Gtk.STOCK_OK, Gtk.ResponseType.OK)
+
+        self.set_default_size(520, 420)
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_border_width(10)
+        self.set_border_width(12)
 
         self.cfg = load_config()
 
         content = self.get_content_area()
         content.set_spacing(12)
 
-        # Header with icon and title
-        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        # Header Box
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
         icon = Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG)
         header_box.pack_start(icon, False, False, 0)
 
         title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         lbl_title = Gtk.Label()
-        lbl_title.set_markup("<big><b>Privilege Elevation & Security</b></big>")
+        lbl_title.set_markup("<big><b>PolicyKit Privilege Elevation</b></big>")
         lbl_title.set_alignment(0.0, 0.5)
         lbl_desc = Gtk.Label()
-        lbl_desc.set_markup("<small>Configure the appearance and security behavior of password prompts.</small>")
+        lbl_desc.set_markup("<small>Configure caller disclosure, screen dimming, password reveal & audio alerts.</small>")
         lbl_desc.set_alignment(0.0, 0.5)
         title_box.pack_start(lbl_title, False, False, 0)
         title_box.pack_start(lbl_desc, False, False, 0)
@@ -87,56 +90,134 @@ class ConfigWindow(Gtk.Dialog):
 
         content.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
 
-        # Settings checkboxes
-        vbox_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        # Tabbed Notebook matching qpolkitconfig modes
+        notebook = Gtk.Notebook()
+        content.pack_start(notebook, True, True, 0)
 
-        self.chk_reveal = Gtk.CheckButton(label="Enable password reveal eye icon")
-        self.chk_reveal.set_tooltip_text("Show an eye button in the password field to unmask characters")
+        # TAB 1: Security & Disclosure
+        page_sec = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page_sec.set_border_width(12)
+
+        self.chk_cmd = Gtk.CheckButton(label="Prominently display calling executable and full binary path")
+        self.chk_cmd.set_tooltip_text("Display /proc/<pid>/exe, arguments, and Polkit Action ID in a prominent framed box")
+        self.chk_cmd.set_active(self.cfg.get("show_full_command", True))
+        page_sec.pack_start(self.chk_cmd, False, False, 0)
+
+        box_timeout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl_timeout = Gtk.Label(label="Inactivity Timeout (seconds):")
+        box_timeout.pack_start(lbl_timeout, False, False, 0)
+        adj_timeout = Gtk.Adjustment(
+            value=self.cfg.get("prompt_timeout", 60),
+            lower=15,
+            upper=300,
+            step_increment=15,
+            page_increment=30
+        )
+        self.spin_timeout = Gtk.SpinButton(adjustment=adj_timeout, climb_rate=1, digits=0)
+        box_timeout.pack_start(self.spin_timeout, False, False, 0)
+        page_sec.pack_start(box_timeout, False, False, 0)
+
+        lbl_sec_hint = Gtk.Label()
+        lbl_sec_hint.set_markup("<small><i>Prevents spoofed elevation by verifying exact binary paths before entering credentials.</i></small>")
+        lbl_sec_hint.set_alignment(0.0, 0.5)
+        page_sec.pack_start(lbl_sec_hint, False, False, 0)
+
+        notebook.append_page(page_sec, Gtk.Label(label="Security & Disclosure"))
+
+        # TAB 2: Prompts & Visuals
+        page_vis = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page_vis.set_border_width(12)
+
+        self.chk_reveal = Gtk.CheckButton(label="Enable password reveal eye icon inside entry field")
+        self.chk_reveal.set_tooltip_text("Show an embedded eye button in the password field to unmask characters")
         self.chk_reveal.set_active(self.cfg.get("reveal_password", True))
-        vbox_opts.pack_start(self.chk_reveal, False, False, 0)
+        page_vis.pack_start(self.chk_reveal, False, False, 0)
 
-        # Reveal mode selector (Toggle vs Press-and-Hold)
+        # Reveal mode selector
         box_mode = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         lbl_mode = Gtk.Label(label="Reveal behavior:")
-        box_mode.pack_start(lbl_mode, False, False, 18)
+        box_mode.pack_start(lbl_mode, False, False, 20)
         self.combo_mode = Gtk.ComboBoxText()
-        self.combo_mode.append("toggle", "Click to toggle (Persistent)")
-        self.combo_mode.append("hold", "Press & hold (Peek)")
+        self.combo_mode.append("toggle", "Click to toggle (Persistent reveal)")
+        self.combo_mode.append("hold", "Press & hold (Peek on hold)")
         self.combo_mode.set_active_id(self.cfg.get("reveal_mode", "toggle"))
         box_mode.pack_start(self.combo_mode, True, True, 0)
-        vbox_opts.pack_start(box_mode, False, False, 0)
-        self.chk_cmd = Gtk.CheckButton(label="Prominently show calling executable and full path")
-        self.chk_cmd.set_tooltip_text("Display the exact binary path and command-line arguments above the password prompt")
-        self.chk_cmd.set_active(self.cfg.get("show_full_command", True))
-        vbox_opts.pack_start(self.chk_cmd, False, False, 0)
+        page_vis.pack_start(box_mode, False, False, 0)
 
-        self.chk_sound = Gtk.CheckButton(label="Play alert sound on authentication request")
+        page_vis.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+
+        # Screen Dimming & Opacity Percentage Slider
+        self.chk_dim = Gtk.CheckButton(label="Enable Windows UAC-style screen dimming")
+        self.chk_dim.set_tooltip_text("Darken the desktop display using Wayland Layer Shell while prompt is open")
+        self.chk_dim.set_active(self.cfg.get("screen_dimming", True))
+        self.chk_dim.connect("toggled", self.on_dim_toggled)
+        page_vis.pack_start(self.chk_dim, False, False, 0)
+
+        self.box_dim_pct = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl_dim_pct = Gtk.Label(label="Dimming Opacity:")
+        self.box_dim_pct.pack_start(lbl_dim_pct, False, False, 20)
+
+        adj_dim = Gtk.Adjustment(
+            value=self.cfg.get("dim_percentage", 65),
+            lower=10,
+            upper=95,
+            step_increment=5,
+            page_increment=10
+        )
+        self.scale_dim = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=adj_dim)
+        self.scale_dim.set_digits(0)
+        self.scale_dim.set_value_pos(Gtk.PositionType.RIGHT)
+        self.box_dim_pct.pack_start(self.scale_dim, True, True, 0)
+        page_vis.pack_start(self.box_dim_pct, False, False, 0)
+        self.on_dim_toggled(self.chk_dim)
+
+        notebook.append_page(page_vis, Gtk.Label(label="Prompts & Visuals"))
+
+        # TAB 3: Audio & Alerts
+        page_snd = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        page_snd.set_border_width(12)
+
+        self.chk_sound = Gtk.CheckButton(label="Play alert sound on privilege elevation request")
         self.chk_sound.set_tooltip_text("Play a notification chime when an application requests root privileges")
         self.chk_sound.set_active(self.cfg.get("play_sound", True))
-        vbox_opts.pack_start(self.chk_sound, False, False, 0)
+        page_snd.pack_start(self.chk_sound, False, False, 0)
 
-        self.chk_dim = Gtk.CheckButton(label="Dim screen background during prompt (Windows UAC style)")
-        self.chk_dim.set_tooltip_text("Darken the desktop background while the password dialog is active to emphasize elevation")
-        self.chk_dim.set_active(self.cfg.get("screen_dimming", False))
-        vbox_opts.pack_start(self.chk_dim, False, False, 0)
+        box_info = Gtk.Frame(label="System Sound Event")
+        vbox_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        vbox_inner.set_border_width(8)
+        lbl_snd_info = Gtk.Label()
+        lbl_snd_info.set_markup("Follows Cinnamon <b>notification-file</b> (window-attention.oga / system bell).")
+        lbl_snd_info.set_alignment(0.0, 0.5)
+        vbox_inner.pack_start(lbl_snd_info, False, False, 0)
+        box_info.add(vbox_inner)
+        page_snd.pack_start(box_info, False, False, 0)
 
-        content.pack_start(vbox_opts, True, True, 0)
+        notebook.append_page(page_snd, Gtk.Label(label="Audio & Alerts"))
 
         self.show_all()
 
+    def on_dim_toggled(self, chk):
+        active = chk.get_active()
+        self.box_dim_pct.set_sensitive(active)
+
     def save_current(self):
+        self.cfg["show_full_command"] = self.chk_cmd.get_active()
+        self.cfg["prompt_timeout"] = int(self.spin_timeout.get_value())
         self.cfg["reveal_password"] = self.chk_reveal.get_active()
         self.cfg["reveal_mode"] = self.combo_mode.get_active_id() or "toggle"
-        self.cfg["show_full_command"] = self.chk_cmd.get_active()
-        self.cfg["play_sound"] = self.chk_sound.get_active()
         self.cfg["screen_dimming"] = self.chk_dim.get_active()
+        self.cfg["dim_percentage"] = int(self.scale_dim.get_value())
+        self.cfg["play_sound"] = self.chk_sound.get_active()
         save_config(self.cfg)
 
 def main():
     app = ConfigWindow()
     while True:
         resp = app.run()
-        if resp in (Gtk.ResponseType.OK, Gtk.ResponseType.APPLY):
+        if resp == 100:  # Test Dialog button
+            app.save_current()
+            subprocess.Popen([AGENT_BINARY, "--test"])
+        elif resp in (Gtk.ResponseType.OK, Gtk.ResponseType.APPLY):
             app.save_current()
             if resp == Gtk.ResponseType.OK:
                 break

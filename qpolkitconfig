@@ -215,11 +215,22 @@ class QPolkitTUI:
                 },
                 {
                     "title": "Windows UAC-Style Screen Dimming",
-                    "badge": "[●] ACTIVE (65% Dim)" if dim_on else "[○] INACTIVE",
+                    "badge": "[●] ACTIVE" if dim_on else "[○] INACTIVE",
                     "badge_col": self.badge | curses.A_BOLD if dim_on else self.yellow,
                     "desc": "Darkens the background display using Wayland Layer Shell while prompt is open",
                     "key": "screen_dimming",
                     "type": "toggle"
+                },
+                {
+                    "title": "Screen Dimming Opacity Percentage",
+                    "badge": f"[ {self.cfg.get('dim_percentage', 65)}% ]",
+                    "badge_col": self.cyan | curses.A_BOLD,
+                    "desc": "Adjust darkness opacity level of the background curtain [← / → adjust]",
+                    "key": "dim_percentage",
+                    "type": "step",
+                    "step": 5,
+                    "min": 10,
+                    "max": 95
                 },
             ]
         else:

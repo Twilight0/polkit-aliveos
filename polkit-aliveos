@@ -38,7 +38,9 @@ CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
 def load_config():
     defaults = {
         "reveal_password": True,
+        "reveal_mode": "toggle",      # "toggle" or "hold"
         "screen_dimming": True,
+        "dim_percentage": 65,         # 10% - 95% opacity
         "play_sound": True,
         "sound_name": "dialog-warning",
         "show_full_command": True,
@@ -93,8 +95,8 @@ def play_alert_sound(custom_sound=None):
             return
         except Exception:
             pass
-def create_dim_overlay():
-    """Creates a translucent full-screen backdrop using Cairo drawing."""
+def create_dim_overlay(dim_pct=65):
+    """Creates a translucent full-screen backdrop using Cairo drawing with configurable opacity."""
     dimmer = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
     dimmer.set_title("polkit-aliveos-dimmer")
     dimmer.set_wmclass("polkit-aliveos-dimmer", "polkit-aliveos-dimmer")
@@ -108,10 +110,12 @@ def create_dim_overlay():
         dimmer.set_visual(visual)
     dimmer.set_app_paintable(True)
 
+    alpha = max(0.1, min(0.95, dim_pct / 100.0))
+
     def on_draw(widget, cr):
         import cairo
         cr.set_operator(cairo.Operator.SOURCE)
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.65)
+        cr.set_source_rgba(0.0, 0.0, 0.0, alpha)
         cr.paint()
         return False
 
@@ -172,7 +176,8 @@ class AuthDialog(Gtk.MessageDialog):
         # Windows UAC-style screen dimming
         if self.cfg.get("screen_dimming", True):
             try:
-                self.dimmer = create_dim_overlay()
+                pct = self.cfg.get("dim_percentage", 65)
+                self.dimmer = create_dim_overlay(pct)
                 self.dimmer.show_all()
             except Exception as e:
                 print(f"[!] Dimmer warning: {e}", file=sys.stderr)
