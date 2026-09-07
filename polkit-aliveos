@@ -52,12 +52,47 @@ def load_config():
             pass
     return defaults
 
-def play_alert_sound(sound_name):
+def get_cinnamon_alert_sound():
+    """Resolves the user's Cinnamon notification / attention sound or standard freedesktop bell."""
     try:
-        subprocess.Popen(["canberra-gtk-play", "-i", sound_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Query Cinnamon notification sound settings
+        res = subprocess.check_output(
+            ["gsettings", "get", "org.cinnamon.sounds", "notification-file"],
+            stderr=subprocess.DEVNULL
+        ).decode().strip().strip("'")
+        if res and os.path.exists(res):
+            return res
     except Exception:
         pass
 
+    for candidate in [
+        "/usr/share/sounds/freedesktop/stereo/window-attention.oga",
+        "/usr/share/sounds/freedesktop/stereo/bell.oga",
+        "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
+    ]:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+def play_alert_sound(custom_sound=None):
+    sound_file = custom_sound or get_cinnamon_alert_sound()
+    if not sound_file:
+        return
+
+    # Try canberra-gtk-play first (respects desktop sound theme & volume)
+    try:
+        subprocess.Popen(["canberra-gtk-play", "-f", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    except Exception:
+        pass
+
+    # Fallback to pw-play (PipeWire) or paplay (PulseAudio)
+    for player in ["pw-play", "paplay"]:
+        try:
+            subprocess.Popen([player, sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            pass
 def create_dim_overlay():
     """Creates a translucent full-screen backdrop using Cairo drawing."""
     dimmer = Gtk.Window(type=Gtk.WindowType.TOPLEVEL)
@@ -342,6 +377,8 @@ def run_test_dialog():
         users=[os.getlogin()],
         cfg=cfg
     )
+    if cfg.get("play_sound", True):
+        play_alert_sound()
     resp = dialog.run()
     dialog.close_dimmer()
     if resp == Gtk.ResponseType.OK:
