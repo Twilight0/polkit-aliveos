@@ -21,6 +21,7 @@ import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
 gi.require_version('GLib', '2.0')
+gi.require_version('Gio', '2.0')
 gi.require_version('Polkit', '1.0')
 gi.require_version('PolkitAgent', '1.0')
 
@@ -31,8 +32,7 @@ try:
 except Exception:
     HAS_LAYER_SHELL = False
 
-from gi.repository import Gtk, Gdk, GLib, Polkit, PolkitAgent
-
+from gi.repository import Gtk, Gdk, GLib, Gio, Polkit, PolkitAgent
 CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
 
 def load_config():
@@ -309,10 +309,12 @@ class AliveosPolkitListener(PolkitAgent.Listener):
         super().__init__()
         self.cfg = load_config()
 
-    def do_initiate_authentication(self, action_id, message, icon_name, details, cookie, identities, cancellable):
+    def do_initiate_authentication(self, action_id, message, icon_name, details, cookie, identities, cancellable, callback, user_data):
         self.cfg = load_config()
         if self.cfg.get("play_sound", True):
             play_alert_sound(self.cfg.get("sound_name", "dialog-warning"))
+
+        task = Gio.Task.new(self, cancellable, callback, user_data)
 
         users = []
         for identity in identities:
@@ -324,18 +326,23 @@ class AliveosPolkitListener(PolkitAgent.Listener):
                 except Exception:
                     pass
 
-        GLib.idle_add(self._run_auth_flow, action_id, message, icon_name, details, cookie, identities, cancellable, users)
+        GLib.idle_add(self._run_auth_flow, action_id, message, icon_name, details, cookie, identities, cancellable, users, task)
 
-    def _run_auth_flow(self, action_id, message, icon_name, details, cookie, identities, cancellable, users):
+    def do_initiate_authentication_finish(self, res):
+        return res.propagate_boolean()
+
+    def _run_auth_flow(self, action_id, message, icon_name, details, cookie, identities, cancellable, users, task):
         dialog = AuthDialog(action_id, message, icon_name, details, users, self.cfg)
         
         target_identity = identities[0] if identities else Polkit.UnixUser.new_for_name(dialog.selected_user)
         session = PolkitAgent.Session.new(target_identity, cookie)
 
         def on_completed(sess, gained_auth):
+            dialog.close_dimmer()
             if gained_auth:
-                dialog.close_dimmer()
                 dialog.response(Gtk.ResponseType.OK)
+                if not task.get_completed():
+                    task.return_boolean(True)
             else:
                 dialog.set_error("Authentication failed. Please try again.")
 
@@ -358,9 +365,10 @@ class AliveosPolkitListener(PolkitAgent.Listener):
                 dlg.close_dimmer()
                 session.cancel()
                 dlg.destroy()
+                if not task.get_completed():
+                    task.return_new_error(GLib.quark_from_string("polkit-error-quark"), 0, "Authentication cancelled")
 
         dialog.connect("response", on_response)
-
 def run_test_dialog():
     cfg = load_config()
     class DummyDetails:
