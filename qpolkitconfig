@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+qpolkitconfig - Curses-based PolicyKit Authentication & Security Manager for Qtile Wayland
+Designed to match the pulsemixer aesthetic across AliveOS utilities (qpowerconfig, qblueconfig, etc.):
+ - Top Mode Bar: 1 Security & Disclosure, 2 Prompts & Visuals, 3 Audio & Alerts
+ - Radio toggles: [●] Enabled / [○] Disabled
+ - Step selectors for timeout values and sound events
+ - Direct hotkeys: [t] Test Dialog, Space/Enter to toggle, 1..3 to switch modes
+ - Clean keyboard navigation: j/k, Up/Down, Esc/q to quit
+ - Directly manages ~/.config/aliveos/polkit-aliveos.json
+"""
+
+import curses
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
+AGENT_BINARY = "/home/twilight/Projects/polkit-aliveos/polkit-aliveos"
+
+DEFAULT_CONFIG = {
+    "reveal_password": True,
+    "reveal_mode": "toggle",      # "toggle" (click to toggle) or "hold" (press & hold)
+    "screen_dimming": True,
+    "play_sound": True,
+    "sound_name": "dialog-warning",
+    "show_full_command": True,
+    "prompt_timeout": 60,
+}
+
+def load_config():
+    cfg = DEFAULT_CONFIG.copy()
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass
+    return cfg
+
+def save_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+class Style:
+    arrow = ' '
+    arrow_focused = '▶'
+
+class QPolkitTUI:
+    MODE_NAMES = ["1 Security & Disclosure", "2 Prompts & Visuals", "3 Audio & Alerts"]
+
+    def __init__(self, stdscr):
+        self.screen = stdscr
+        self.cfg = load_config()
+        self.active_mode = 0  # 0: Security, 1: Visuals, 2: Audio
+        self.focus_idx = 0
+        self.status_msg = ""
+        self.status_color = 1
+
+        self.init_curses()
+        self.init_colors()
+
+    def init_curses(self):
+        curses.curs_set(0)
+        self.screen.nodelay(False)
+        self.screen.keypad(True)
+        self.screen.border(0)
+        self.screen.clear()
+        self.screen.refresh()
+
+    def init_colors(self):
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(1, curses.COLOR_GREEN, -1)   # Green / Active
+            curses.init_pair(2, curses.COLOR_YELLOW, -1)  # Yellow
+            curses.init_pair(3, curses.COLOR_RED, -1)     # Red
+            curses.init_pair(4, curses.COLOR_CYAN, -1)    # Cyan / Accent
+            curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_CYAN) # Inverted active
+            curses.init_pair(6, curses.COLOR_MAGENTA, -1) # Magenta
+            curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_GREEN) # Active Badge
+            curses.init_pair(8, curses.COLOR_WHITE, curses.COLOR_BLUE)  # Mode Tabs
+            curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_WHITE) # Key badge
+            self.green = curses.color_pair(1)
+            self.yellow = curses.color_pair(2)
+            self.red = curses.color_pair(3)
+            self.cyan = curses.color_pair(4)
+            self.inv = curses.color_pair(5)
+            self.magenta = curses.color_pair(6)
+            self.badge = curses.color_pair(7)
+            self.tab_active = curses.color_pair(8)
+            self.key_badge = curses.color_pair(9)
+        else:
+            self.green = self.yellow = self.red = self.cyan = self.inv = self.magenta = self.badge = self.tab_active = self.key_badge = curses.A_NORMAL
+
+    def safe_addstr(self, y, x, text, attr=0):
+        h, w = self.screen.getmaxyx()
+        if 0 <= y < h - 1 and 0 <= x < w:
+            max_len = max(0, w - x - 1)
+            if max_len > 0:
+                try:
+                    self.screen.addstr(y, x, str(text)[:max_len], attr)
+                except curses.error:
+                    pass
+
+    def draw_top_bar(self, lines, cols):
+        x = 2
+        for i, title in enumerate(self.MODE_NAMES):
+            is_active = (i == self.active_mode)
+            if is_active:
+                attr = self.inv | curses.A_BOLD
+            else:
+                attr = self.cyan
+            self.safe_addstr(0, x, f" {title} ", attr)
+            x += len(title) + 4
+
+    def draw_keybind_ribbon(self, start_y, cols):
+        row1 = [
+            ("Space/Enter", "Toggle / Cycle Option"),
+            ("t", "Test Auth Dialog"),
+            ("1..3", "Direct Tab"),
+        ]
+        row2 = [
+            ("← / →", "Switch Tabs"),
+            ("F1 / ?", "Help"),
+            ("Esc / q", "Save & Quit"),
+        ]
+
+        x = 3
+        for k, action in row1:
+            if x + len(k) + len(action) + 4 < cols - 2:
+                self.safe_addstr(start_y, x, f" {k} ", self.key_badge | curses.A_BOLD)
+                x += len(k) + 2
+                self.safe_addstr(start_y, x, f" {action}   ", self.cyan)
+                x += len(action) + 4
+
+        x = 3
+        for k, action in row2:
+            if x + len(k) + len(action) + 4 < cols - 2:
+                self.safe_addstr(start_y + 1, x, f" {k} ", self.key_badge | curses.A_BOLD)
+                x += len(k) + 2
+                self.safe_addstr(start_y + 1, x, f" {action}   ", self.magenta)
+                x += len(action) + 4
+
+        try:
+            self.safe_addstr(start_y + 2, 0, "─" * (cols - 1))
+        except curses.error:
+            pass
+
+    def draw_bottom_bar(self, lines, cols):
+        if self.status_msg:
+            self.safe_addstr(lines - 1, 3, f"ℹ {self.status_msg}"[:cols - 6], curses.color_pair(self.status_color) | curses.A_BOLD)
+        else:
+            dim_st = "ON" if self.cfg.get("screen_dimming") else "OFF"
+            snd_st = "ON" if self.cfg.get("play_sound") else "OFF"
+            rev_st = self.cfg.get("reveal_mode", "toggle").upper()
+            hint = f" polkit-aliveos | Dimming: [{dim_st}] | Sound: [{snd_st}] | Reveal: [{rev_st}] | [t] Preview Dialog "
+            self.safe_addstr(lines - 1, max(2, (cols - len(hint)) // 2), hint, curses.A_DIM)
+
+    def get_entries(self):
+        if self.active_mode == 0:
+            # Mode 1: Security & Disclosure
+            show_cmd = self.cfg.get("show_full_command", True)
+            return [
+                {
+                    "title": "Prominently Display Calling Executable Path",
+                    "badge": "[●] EXPLICIT DISCLOSURE" if show_cmd else "[○] Generic Summary",
+                    "badge_col": self.badge | curses.A_BOLD if show_cmd else self.yellow,
+                    "desc": "Displays full binary path (/proc/<pid>/exe), args, and Polkit Action ID in a prominent frame",
+                    "key": "show_full_command",
+                    "type": "toggle"
+                },
+                {
+                    "title": "Authentication Prompt Inactivity Timeout",
+                    "badge": f"[ {self.cfg.get('prompt_timeout', 60)}s ]",
+                    "badge_col": self.cyan | curses.A_BOLD,
+                    "desc": "Automatically cancels authentication dialog if left unattended [← / → adjust]",
+                    "key": "prompt_timeout",
+                    "type": "step",
+                    "step": 15,
+                    "min": 15,
+                    "max": 300
+                },
+            ]
+        elif self.active_mode == 1:
+            # Mode 2: Prompts & Visuals
+            rev_on = self.cfg.get("reveal_password", True)
+            rev_mode = self.cfg.get("reveal_mode", "toggle")
+            dim_on = self.cfg.get("screen_dimming", True)
+            return [
+                {
+                    "title": "Password Reveal Eye Icon",
+                    "badge": "[●] ENABLED" if rev_on else "[○] DISABLED",
+                    "badge_col": self.badge | curses.A_BOLD if rev_on else self.yellow,
+                    "desc": "Embedded secondary eye icon inside password field to unmask characters",
+                    "key": "reveal_password",
+                    "type": "toggle"
+                },
+                {
+                    "title": "Password Reveal Interaction Mode",
+                    "badge": "[ Click to Toggle ]" if rev_mode == "toggle" else "[ Press & Hold (Peek) ]",
+                    "badge_col": self.cyan | curses.A_BOLD,
+                    "desc": "Switch between click-to-toggle persistent reveal vs hold-down to peek",
+                    "key": "reveal_mode",
+                    "type": "cycle",
+                    "options": ["toggle", "hold"]
+                },
+                {
+                    "title": "Windows UAC-Style Screen Dimming",
+                    "badge": "[●] ACTIVE (65% Dim)" if dim_on else "[○] INACTIVE",
+                    "badge_col": self.badge | curses.A_BOLD if dim_on else self.yellow,
+                    "desc": "Darkens the background display using Wayland Layer Shell while prompt is open",
+                    "key": "screen_dimming",
+                    "type": "toggle"
+                },
+            ]
+        else:
+            # Mode 3: Audio & Alerts
+            snd_on = self.cfg.get("play_sound", True)
+            return [
+                {
+                    "title": "Play Audio Chime on Privilege Elevation Request",
+                    "badge": "[●] ENABLED" if snd_on else "[○] MUTED",
+                    "badge_col": self.badge | curses.A_BOLD if snd_on else self.yellow,
+                    "desc": "Plays the Cinnamon notification/bell chime when an app requests root permissions",
+                    "key": "play_sound",
+                    "type": "toggle"
+                },
+                {
+                    "title": "Audio Notification Source",
+                    "badge": "[ Cinnamon GSettings / Bell ]",
+                    "badge_col": self.green | curses.A_BOLD,
+                    "desc": "Automatically follows Cinnamon 'org.cinnamon.sounds notification-file' (window-attention.oga)",
+                    "key": None,
+                    "type": "info"
+                },
+            ]
+
+    def display(self):
+        self.screen.erase()
+        lines, cols = self.screen.getmaxyx()
+        max_drawable_y = lines - 2
+
+        self.screen.border(0)
+        self.draw_top_bar(lines, cols)
+        self.draw_keybind_ribbon(1, cols)
+        self.draw_bottom_bar(lines, cols)
+
+        entries = self.get_entries()
+        self.focus_idx = max(0, min(self.focus_idx, len(entries) - 1))
+
+        y = 4
+        for i, item in enumerate(entries):
+            if y + 2 >= max_drawable_y:
+                break
+
+            is_focused = (i == self.focus_idx)
+            arrow = Style.arrow_focused if is_focused else Style.arrow
+
+            self.safe_addstr(y, 2, f" {arrow} ", self.cyan | curses.A_BOLD if is_focused else curses.A_NORMAL)
+            self.safe_addstr(y, 6, item["title"][:cols - 35], curses.A_BOLD if is_focused else curses.A_NORMAL)
+
+            badge = item.get("badge", "")
+            badge_col = item.get("badge_col", curses.A_NORMAL)
+            badge_x = max(20, cols - len(badge) - 3)
+            self.safe_addstr(y, badge_x, badge, badge_col)
+
+            desc = item.get("desc", "")
+            self.safe_addstr(y + 1, 8, desc[:cols - 10], self.cyan if is_focused else curses.A_DIM)
+
+            y += 3
+
+        self.screen.refresh()
+
+    def display_helpwin(self):
+        doc = [
+            ("j k   ↑ ↓",            "Navigate settings"),
+            ("Space / Enter",        "Toggle option or cycle mode"),
+            ("h l   ← →",            "Adjust numeric values (timeout)"),
+            ("t",                    "Launch live test authentication prompt"),
+            ("1  2  3",              "Jump directly to mode tab"),
+            ("← / →  Tab / S-Tab",   "Switch mode tabs"),
+            ("Esc / q",              "Save configuration and quit"),
+        ]
+
+        h, w = self.screen.getmaxyx()
+        win_h = len(doc) + 4
+        win_w = 76
+        start_y = max(1, (h - win_h) // 2)
+        start_x = max(2, (w - win_w) // 2)
+
+        helpwin = curses.newwin(win_h, win_w, start_y, start_x)
+        helpwin.erase()
+        helpwin.border(0)
+        helpwin.attron(curses.A_BOLD)
+        helpwin.addstr(0, 3, " QPolkitConfig Help ")
+        helpwin.attroff(curses.A_BOLD)
+
+        for i, (keys, desc) in enumerate(doc):
+            helpwin.addstr(i + 2, 3, keys.ljust(22), self.cyan | curses.A_BOLD)
+            helpwin.addstr(i + 2, 26, desc)
+
+        helpwin.refresh()
+
+        while True:
+            ch = self.screen.getch()
+            if ch in (ord('q'), 27, curses.KEY_F1, ord('?'), 10, 13, ord(' '), curses.KEY_BACKSPACE, 127, 8):
+                break
+
+    def execute_focused(self):
+        entries = self.get_entries()
+        if not entries:
+            return
+        item = entries[self.focus_idx]
+        t = item.get("type")
+        key = item.get("key")
+
+        if t == "toggle":
+            cur = self.cfg.get(key, True)
+            self.cfg[key] = not cur
+            save_config(self.cfg)
+            state_str = "ENABLED" if self.cfg[key] else "DISABLED"
+            self.status_msg = f"{item['title']}: {state_str}"
+            self.status_color = 1
+
+        elif t == "cycle":
+            opts = item.get("options", [])
+            cur = self.cfg.get(key, opts[0] if opts else "toggle")
+            idx = opts.index(cur) if cur in opts else 0
+            new_val = opts[(idx + 1) % len(opts)]
+            self.cfg[key] = new_val
+            save_config(self.cfg)
+            self.status_msg = f"{item['title']} set to '{new_val.upper()}'"
+            self.status_color = 1
+
+    def modify_numeric(self, delta):
+        entries = self.get_entries()
+        if not entries:
+            return
+        item = entries[self.focus_idx]
+        if item.get("type") == "step":
+            key = item.get("key")
+            step = item.get("step", 15)
+            min_v = item.get("min", 15)
+            max_v = item.get("max", 300)
+            cur = self.cfg.get(key, 60)
+            new_v = max(min_v, min(max_v, cur + delta * step))
+            self.cfg[key] = new_v
+            save_config(self.cfg)
+            self.status_msg = f"{item['title']}: {new_v}s"
+            self.status_color = 1
+
+    def test_dialog(self):
+        self.status_msg = "Launching live test prompt..."
+        self.display()
+        subprocess.Popen([AGENT_BINARY, "--test"])
+
+    def run(self):
+        signal.signal(signal.SIGWINCH, lambda s, f: None)
+
+        while True:
+            self.display()
+            ch = self.screen.getch()
+
+            if ch in (ord('q'), 27):
+                save_config(self.cfg)
+                break
+
+            elif ch in (curses.KEY_F1, ord('?')):
+                self.display_helpwin()
+                continue
+
+            elif ch in (ord('\t'), curses.KEY_RIGHT, ord('l')):
+                entries = self.get_entries()
+                if entries and entries[self.focus_idx].get("type") == "step" and ch in (curses.KEY_RIGHT, ord('l')):
+                    self.modify_numeric(1)
+                else:
+                    self.active_mode = (self.active_mode + 1) % len(self.MODE_NAMES)
+                    self.focus_idx = 0
+
+            elif ch in (curses.KEY_BTAB, 353, curses.KEY_LEFT, ord('h')):
+                entries = self.get_entries()
+                if entries and entries[self.focus_idx].get("type") == "step" and ch in (curses.KEY_LEFT, ord('h')):
+                    self.modify_numeric(-1)
+                else:
+                    self.active_mode = (self.active_mode - 1) % len(self.MODE_NAMES)
+                    self.focus_idx = 0
+
+            elif ord('1') <= ch <= ord('3'):
+                self.active_mode = ch - ord('1')
+                self.focus_idx = 0
+
+            elif ch in (curses.KEY_UP, ord('k')):
+                entries = self.get_entries()
+                if entries:
+                    self.focus_idx = (self.focus_idx - 1) % len(entries)
+
+            elif ch in (curses.KEY_DOWN, ord('j')):
+                entries = self.get_entries()
+                if entries:
+                    self.focus_idx = (self.focus_idx + 1) % len(entries)
+
+            elif ch in (ord(' '), 10, 13, curses.KEY_ENTER):
+                self.execute_focused()
+
+            elif ch == ord('t'):
+                self.test_dialog()
+
+def main():
+    curses.wrapper(lambda stdscr: QPolkitTUI(stdscr).run())
+
+if __name__ == "__main__":
+    main()
