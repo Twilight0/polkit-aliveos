@@ -103,22 +103,22 @@ class AuthDialog(Gtk.MessageDialog):
             buttons=Gtk.ButtonsType.OK_CANCEL,
             text=message or "Authentication Required"
         )
-        self.set_wmclass("polkit-aliveos", "polkit-aliveos")
         self.set_title("Authentication Required")
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_default_response(Gtk.ResponseType.OK)
 
-        # Wayland Layer Shell: Dialog sits on OVERLAY (above the TOP layer dimmer)
-        if HAS_LAYER_SHELL and cfg.get("screen_dimming", True):
-            GtkLayerShell.init_for_window(self)
-            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
-            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
-        else:
-            self.set_keep_above(True)
+        self.cfg = cfg
         self.action_id = action_id
         self.users = users
         self.selected_user = users[0] if users else os.getlogin()
         self.dimmer = None
+
+        # Wayland Layer Shell: Dialog sits on OVERLAY (above the TOP layer dimmer)
+        if HAS_LAYER_SHELL and self.cfg.get("screen_dimming", True):
+            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+        else:
+            self.set_keep_above(True)
 
         # Parse caller details
         self.caller_exe = None
