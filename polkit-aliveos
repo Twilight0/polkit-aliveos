@@ -84,8 +84,8 @@ def create_dim_overlay():
 
     if HAS_LAYER_SHELL:
         GtkLayerShell.init_for_window(dimmer)
-        # BOTTOM layer places the dark overlay above wallpaper/tiled windows but behind floating windows & dialogs
-        GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.BOTTOM)
+        # TOP layer covers normal windows, panels, and wallpapers
+        GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.TOP)
         for edge in (GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT, GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM):
             GtkLayerShell.set_anchor(dimmer, edge, True)
         GtkLayerShell.set_keyboard_mode(dimmer, GtkLayerShell.KeyboardMode.NONE)
@@ -106,9 +106,15 @@ class AuthDialog(Gtk.MessageDialog):
         self.set_wmclass("polkit-aliveos", "polkit-aliveos")
         self.set_title("Authentication Required")
         self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_keep_above(True)
         self.set_default_response(Gtk.ResponseType.OK)
-        self.cfg = cfg
+
+        # Wayland Layer Shell: Dialog sits on OVERLAY (above the TOP layer dimmer)
+        if HAS_LAYER_SHELL and cfg.get("screen_dimming", True):
+            GtkLayerShell.init_for_window(self)
+            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+            GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+        else:
+            self.set_keep_above(True)
         self.action_id = action_id
         self.users = users
         self.selected_user = users[0] if users else os.getlogin()
@@ -209,10 +215,16 @@ class AuthDialog(Gtk.MessageDialog):
         # Password Reveal Eye Icon
         if self.cfg.get("reveal_password", True):
             self.entry_pass.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
-            self.entry_pass.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Click to show / hide password")
             self.entry_pass.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, True)
-            self.entry_pass.connect("icon-press", self.on_reveal_toggle)
-            self.entry_pass.connect("icon-release", self.on_reveal_toggle)
+            
+            reveal_mode = self.cfg.get("reveal_mode", "toggle")
+            if reveal_mode == "hold":
+                self.entry_pass.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Press and hold to peek at password")
+                self.entry_pass.connect("icon-press", self.on_reveal_press)
+                self.entry_pass.connect("icon-release", self.on_reveal_release)
+            else:
+                self.entry_pass.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, "Click to toggle password visibility")
+                self.entry_pass.connect("icon-release", self.on_reveal_toggle)
 
         entry_vbox.pack_start(self.entry_pass, False, False, 0)
 
@@ -232,6 +244,15 @@ class AuthDialog(Gtk.MessageDialog):
             icon = "view-conceal-symbolic" if vis else "view-reveal-symbolic"
             entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, icon)
 
+    def on_reveal_press(self, entry, icon_pos, event):
+        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
+            entry.set_visibility(True)
+            entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-conceal-symbolic")
+
+    def on_reveal_release(self, entry, icon_pos, event):
+        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
+            entry.set_visibility(False)
+            entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
     def close_dimmer(self):
         if self.dimmer:
             self.dimmer.destroy()

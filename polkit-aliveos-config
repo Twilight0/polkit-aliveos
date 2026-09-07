@@ -20,7 +20,8 @@ CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
 
 DEFAULT_CONFIG = {
     "reveal_password": True,
-    "screen_dimming": False,
+    "reveal_mode": "toggle",      # "toggle" (click to toggle) or "hold" (press & hold)
+    "screen_dimming": True,
     "play_sound": True,
     "sound_name": "dialog-warning",
     "show_full_command": True,
@@ -89,11 +90,21 @@ class ConfigWindow(Gtk.Dialog):
         # Settings checkboxes
         vbox_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
 
-        self.chk_reveal = Gtk.CheckButton(label="Enable password reveal toggle (peek eye icon)")
-        self.chk_reveal.set_tooltip_text("Show an eye button in the password field to temporarily unmask characters")
+        self.chk_reveal = Gtk.CheckButton(label="Enable password reveal eye icon")
+        self.chk_reveal.set_tooltip_text("Show an eye button in the password field to unmask characters")
         self.chk_reveal.set_active(self.cfg.get("reveal_password", True))
         vbox_opts.pack_start(self.chk_reveal, False, False, 0)
 
+        # Reveal mode selector (Toggle vs Press-and-Hold)
+        box_mode = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl_mode = Gtk.Label(label="Reveal behavior:")
+        box_mode.pack_start(lbl_mode, False, False, 18)
+        self.combo_mode = Gtk.ComboBoxText()
+        self.combo_mode.append("toggle", "Click to toggle (Persistent)")
+        self.combo_mode.append("hold", "Press & hold (Peek)")
+        self.combo_mode.set_active_id(self.cfg.get("reveal_mode", "toggle"))
+        box_mode.pack_start(self.combo_mode, True, True, 0)
+        vbox_opts.pack_start(box_mode, False, False, 0)
         self.chk_cmd = Gtk.CheckButton(label="Prominently show calling executable and full path")
         self.chk_cmd.set_tooltip_text("Display the exact binary path and command-line arguments above the password prompt")
         self.chk_cmd.set_active(self.cfg.get("show_full_command", True))
@@ -115,6 +126,7 @@ class ConfigWindow(Gtk.Dialog):
 
     def save_current(self):
         self.cfg["reveal_password"] = self.chk_reveal.get_active()
+        self.cfg["reveal_mode"] = self.combo_mode.get_active_id() or "toggle"
         self.cfg["show_full_command"] = self.chk_cmd.get_active()
         self.cfg["play_sound"] = self.chk_sound.get_active()
         self.cfg["screen_dimming"] = self.chk_dim.get_active()
