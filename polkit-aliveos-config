@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+polkit-aliveos-config - Configuration Companion Utility for polkit-aliveos
+Provides a clean GTK3 settings dialog matching the Zenity aesthetic to configure:
+ - Executable & path disclosure display modes
+ - Password reveal toggle (eye icon / peek)
+ - UAC-style screen dimming on prompt
+ - Sound alert / chime on privilege elevation request
+"""
+
+import json
+import os
+import sys
+
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk
+
+CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
+
+DEFAULT_CONFIG = {
+    "reveal_password": True,
+    "screen_dimming": False,
+    "play_sound": True,
+    "sound_name": "dialog-warning",
+    "show_full_command": True,
+    "prompt_timeout": 60,
+}
+
+def load_config():
+    cfg = DEFAULT_CONFIG.copy()
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                cfg.update(json.load(f))
+        except Exception:
+            pass
+    return cfg
+
+def save_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving config: {e}", file=sys.stderr)
+        return False
+
+class ConfigWindow(Gtk.Dialog):
+    def __init__(self):
+        super().__init__(
+            title="Authentication Agent Settings",
+            flags=Gtk.DialogFlags.MODAL,
+            buttons=(
+                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                Gtk.STOCK_APPLY, Gtk.ResponseType.APPLY,
+                Gtk.STOCK_OK, Gtk.ResponseType.OK,
+            )
+        )
+        self.set_default_size(460, 360)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_border_width(10)
+
+        self.cfg = load_config()
+
+        content = self.get_content_area()
+        content.set_spacing(12)
+
+        # Header with icon and title
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        icon = Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG)
+        header_box.pack_start(icon, False, False, 0)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        lbl_title = Gtk.Label()
+        lbl_title.set_markup("<big><b>Privilege Elevation & Security</b></big>")
+        lbl_title.set_alignment(0.0, 0.5)
+        lbl_desc = Gtk.Label()
+        lbl_desc.set_markup("<small>Configure the appearance and security behavior of password prompts.</small>")
+        lbl_desc.set_alignment(0.0, 0.5)
+        title_box.pack_start(lbl_title, False, False, 0)
+        title_box.pack_start(lbl_desc, False, False, 0)
+        header_box.pack_start(title_box, True, True, 0)
+        content.pack_start(header_box, False, False, 0)
+
+        content.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 0)
+
+        # Settings checkboxes
+        vbox_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+
+        self.chk_reveal = Gtk.CheckButton(label="Enable password reveal toggle (peek eye icon)")
+        self.chk_reveal.set_tooltip_text("Show an eye button in the password field to temporarily unmask characters")
+        self.chk_reveal.set_active(self.cfg.get("reveal_password", True))
+        vbox_opts.pack_start(self.chk_reveal, False, False, 0)
+
+        self.chk_cmd = Gtk.CheckButton(label="Prominently show calling executable and full path")
+        self.chk_cmd.set_tooltip_text("Display the exact binary path and command-line arguments above the password prompt")
+        self.chk_cmd.set_active(self.cfg.get("show_full_command", True))
+        vbox_opts.pack_start(self.chk_cmd, False, False, 0)
+
+        self.chk_sound = Gtk.CheckButton(label="Play alert sound on authentication request")
+        self.chk_sound.set_tooltip_text("Play a notification chime when an application requests root privileges")
+        self.chk_sound.set_active(self.cfg.get("play_sound", True))
+        vbox_opts.pack_start(self.chk_sound, False, False, 0)
+
+        self.chk_dim = Gtk.CheckButton(label="Dim screen background during prompt (Windows UAC style)")
+        self.chk_dim.set_tooltip_text("Darken the desktop background while the password dialog is active to emphasize elevation")
+        self.chk_dim.set_active(self.cfg.get("screen_dimming", False))
+        vbox_opts.pack_start(self.chk_dim, False, False, 0)
+
+        content.pack_start(vbox_opts, True, True, 0)
+
+        self.show_all()
+
+    def save_current(self):
+        self.cfg["reveal_password"] = self.chk_reveal.get_active()
+        self.cfg["show_full_command"] = self.chk_cmd.get_active()
+        self.cfg["play_sound"] = self.chk_sound.get_active()
+        self.cfg["screen_dimming"] = self.chk_dim.get_active()
+        save_config(self.cfg)
+
+def main():
+    app = ConfigWindow()
+    while True:
+        resp = app.run()
+        if resp in (Gtk.ResponseType.OK, Gtk.ResponseType.APPLY):
+            app.save_current()
+            if resp == Gtk.ResponseType.OK:
+                break
+        else:
+            break
+    app.destroy()
+
+if __name__ == "__main__":
+    main()

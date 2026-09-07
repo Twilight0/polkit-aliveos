@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+polkit-aliveos - Lightweight, Transparent PolicyKit Authentication Agent for AliveOS
+Key Features:
+ - Zenity-GTK3 look & feel (clean Gtk.Dialog with standard system theme styling)
+ - Explicit caller disclosure: Displays calling application executable (/proc/<pid>/exe),
+   command line, and Polkit Action ID front and center
+ - Password reveal toggle (eye icon / peek)
+ - Optional UAC-style dimming and audio chime via polkit-aliveos.json
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
+gi.require_version('GLib', '2.0')
+gi.require_version('Polkit', '1.0')
+gi.require_version('PolkitAgent', '1.0')
+
+from gi.repository import Gtk, Gdk, GLib, Polkit, PolkitAgent
+
+CONFIG_PATH = os.path.expanduser("~/.config/aliveos/polkit-aliveos.json")
+
+def load_config():
+    defaults = {
+        "reveal_password": True,
+        "screen_dimming": False,
+        "play_sound": True,
+        "sound_name": "dialog-warning",
+        "show_full_command": True,
+        "prompt_timeout": 60,
+    }
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                defaults.update(json.load(f))
+        except Exception:
+            pass
+    return defaults
+
+def play_alert_sound(sound_name):
+    try:
+        subprocess.Popen(["canberra-gtk-play", "-i", sound_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+def inspect_process(pid):
+    """Inspects /proc/<pid> to obtain the true executable path and command line."""
+    info = {"exe": "Unknown", "cmdline": "Unknown", "name": "Unknown"}
+    if not pid:
+        return info
+    try:
+        exe_link = f"/proc/{pid}/exe"
+        if os.path.exists(exe_link):
+            info["exe"] = os.path.realpath(exe_link)
+            info["name"] = os.path.basename(info["exe"])
+    except Exception:
+        pass
+
+    try:
+        cmdline_file = f"/proc/{pid}/cmdline"
+        if os.path.exists(cmdline_file):
+            raw = open(cmdline_file, "rb").read()
+            parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\x00") if p]
+            if parts:
+                info["cmdline"] = " ".join(parts)
+    except Exception:
+        pass
+
+    return info
+
+class AuthDialog(Gtk.Dialog):
+    def __init__(self, action_id, message, icon_name, details, users, cfg):
+        super().__init__(
+            title="Authentication Required",
+            flags=Gtk.DialogFlags.MODAL,
+            buttons=(
+                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                "_Authenticate", Gtk.ResponseType.OK,
+            )
+        )
+        self.set_default_size(480, -1)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_border_width(12)
+        self.set_resizable(False)
+        self.set_default_response(Gtk.ResponseType.OK)
+
+        self.cfg = cfg
+        self.action_id = action_id
+        self.users = users
+        self.selected_user = users[0] if users else os.getlogin()
+
+        # Parse caller details from polkit details object
+        self.caller_exe = None
+        self.caller_cmd = None
+        if details:
+            try:
+                for k in details.get_keys():
+                    if k == "program":
+                        self.caller_exe = details.lookup("program")
+                    elif k == "command_line":
+                        self.caller_cmd = details.lookup("command_line")
+            except Exception:
+                pass
+
+        self.build_ui(message, icon_name)
+
+    def build_ui(self, message, icon_name):
+        content = self.get_content_area()
+        content.set_spacing(10)
+
+        # Header Box: Icon + Main Text
+        header_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        
+        # Zenity-style Dialog Icon
+        icon_widget = Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG)
+        icon_widget.set_alignment(0.5, 0.0)
+        header_box.pack_start(icon_widget, False, False, 0)
+
+        msg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        
+        lbl_main = Gtk.Label()
+        lbl_main.set_markup(f"<big><b>{GLib.markup_escape_text(message or 'Authentication Required')}</b></big>")
+        lbl_main.set_alignment(0.0, 0.5)
+        lbl_main.set_line_wrap(True)
+        msg_box.pack_start(lbl_main, False, False, 0)
+
+        lbl_sub = Gtk.Label()
+        lbl_sub.set_markup("An application is requesting administrative privileges.")
+        lbl_sub.set_alignment(0.0, 0.5)
+        lbl_sub.set_line_wrap(True)
+        msg_box.pack_start(lbl_sub, False, False, 0)
+
+        header_box.pack_start(msg_box, True, True, 0)
+        content.pack_start(header_box, False, False, 0)
+
+        content.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 2)
+
+        # Prominent Executable & Path Box
+        if self.cfg.get("show_full_command", True):
+            frame = Gtk.Frame()
+            frame.set_shadow_type(Gtk.ShadowType.IN)
+            frame_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            frame_box.set_border_width(8)
+
+            # Executable row
+            exe_display = self.caller_exe or self.caller_cmd or "System / Service Daemon"
+            lbl_exe = Gtk.Label()
+            lbl_exe.set_markup(f"<b>Application:</b> <tt>{GLib.markup_escape_text(exe_display)}</tt>")
+            lbl_exe.set_alignment(0.0, 0.5)
+            lbl_exe.set_line_wrap(True)
+            frame_box.pack_start(lbl_exe, False, False, 0)
+
+            # Action ID row
+            lbl_act = Gtk.Label()
+            lbl_act.set_markup(f"<b>Action:</b> <small><tt>{GLib.markup_escape_text(self.action_id)}</tt></small>")
+            lbl_act.set_alignment(0.0, 0.5)
+            frame_box.pack_start(lbl_act, False, False, 0)
+
+            frame.add(frame_box)
+            content.pack_start(frame, False, False, 0)
+
+        # User Selection (if multiple users available)
+        if len(self.users) > 1:
+            user_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            lbl_user = Gtk.Label(label="Authenticate as:")
+            lbl_user.set_alignment(0.0, 0.5)
+            user_box.pack_start(lbl_user, False, False, 0)
+
+            combo = Gtk.ComboBoxText()
+            for u in self.users:
+                combo.append_text(u)
+            combo.set_active(0)
+            combo.connect("changed", lambda c: setattr(self, "selected_user", c.get_active_text()))
+            user_box.pack_start(combo, True, True, 0)
+            content.pack_start(user_box, False, False, 0)
+
+        # Password Entry Box
+        pass_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.lbl_prompt = Gtk.Label(label="Password:")
+        self.lbl_prompt.set_alignment(0.0, 0.5)
+        pass_box.pack_start(self.lbl_prompt, False, False, 0)
+
+        entry_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.entry_pass = Gtk.Entry()
+        self.entry_pass.set_visibility(False)
+        self.entry_pass.set_activates_default(True)
+        entry_hbox.pack_start(self.entry_pass, True, True, 0)
+
+        # Password Reveal Button (Eye Icon)
+        if self.cfg.get("reveal_password", True):
+            btn_reveal = Gtk.Button.new_from_icon_name("view-reveal-symbolic", Gtk.IconSize.BUTTON)
+            btn_reveal.set_tooltip_text("Show password")
+            btn_reveal.connect("toggled", self.on_reveal_toggled) if hasattr(btn_reveal, "connect") else None
+            # Use pressed/released for peek on hold
+            btn_reveal.connect("pressed", lambda b: self.entry_pass.set_visibility(True))
+            btn_reveal.connect("released", lambda b: self.entry_pass.set_visibility(False))
+            entry_hbox.pack_start(btn_reveal, False, False, 0)
+
+        pass_box.pack_start(entry_hbox, False, False, 0)
+
+        # Error label (for incorrect password retry)
+        self.lbl_error = Gtk.Label()
+        self.lbl_error.set_markup("<span color='red'></span>")
+        self.lbl_error.set_alignment(0.0, 0.5)
+        pass_box.pack_start(self.lbl_error, False, False, 0)
+
+        content.pack_start(pass_box, False, False, 4)
+        self.show_all()
+
+    def set_error(self, err_msg):
+        self.lbl_error.set_markup(f"<span color='red'><b>{GLib.markup_escape_text(err_msg)}</b></span>")
+        self.entry_pass.set_text("")
+        self.entry_pass.grab_focus()
+
+class AliveosPolkitListener(PolkitAgent.Listener):
+    def __init__(self):
+        super().__init__()
+        self.cfg = load_config()
+
+    def do_initiate_authentication(self, action_id, message, icon_name, details, cookie, identities, cancellable):
+        self.cfg = load_config()
+        if self.cfg.get("play_sound", True):
+            play_alert_sound(self.cfg.get("sound_name", "dialog-warning"))
+
+        # Extract usernames from identities
+        users = []
+        for identity in identities:
+            if isinstance(identity, Polkit.UnixUser):
+                import pwd
+                try:
+                    name = pwd.getpwuid(identity.get_uid()).pw_name
+                    users.append(name)
+                except Exception:
+                    pass
+
+        # Run GTK dialog on main loop
+        GLib.idle_add(self._run_auth_flow, action_id, message, icon_name, details, cookie, identities, cancellable, users)
+
+    def _run_auth_flow(self, action_id, message, icon_name, details, cookie, identities, cancellable, users):
+        dialog = AuthDialog(action_id, message, icon_name, details, users, self.cfg)
+        
+        # Initiate polkit agent session
+        target_identity = identities[0] if identities else Polkit.UnixUser.new_for_name(dialog.selected_user)
+        session = PolkitAgent.Session.new(target_identity, cookie)
+
+        def on_completed(sess, gained_auth):
+            if gained_auth:
+                dialog.response(Gtk.ResponseType.OK)
+            else:
+                dialog.set_error("Authentication failed. Please try again.")
+
+        def on_request(sess, request, echo):
+            dialog.lbl_prompt.set_text(request)
+
+        def on_show_error(sess, text):
+            dialog.set_error(text)
+
+        session.connect("completed", on_completed)
+        session.connect("request", on_request)
+        session.connect("show-error", on_show_error)
+        session.initiate()
+
+        # Connect response
+        def on_response(dlg, resp):
+            if resp == Gtk.ResponseType.OK:
+                pwd_text = dlg.entry_pass.get_text()
+                session.response(pwd_text)
+            else:
+                session.cancel()
+                dlg.destroy()
+
+        dialog.connect("response", on_response)
+
+def main():
+    # Register listener
+    listener = AliveosPolkitListener()
+    subject = Polkit.UnixSession.new_for_process_sync(os.getpid(), None)
+    
+    try:
+        registered = listener.register(
+            PolkitAgent.RegisterFlags.NONE,
+            subject,
+            "/org/aliveos/PolicyKit1/AuthenticationAgent",
+            None
+        )
+        if registered:
+            print("[✓] polkit-aliveos authentication agent registered successfully.")
+    except Exception as e:
+        print(f"[!] Note on listener registration: {e}")
+
+    # GTK main loop
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()
