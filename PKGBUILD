@@ -1,23 +1,28 @@
 # Maintainer: Twilight0 <https://github.com/Twilight0>
 pkgname=polkit-aliveos
-pkgver=1.0.0
+pkgver=0.1.0
 pkgrel=1
-pkgdesc="Transparent Polkit authentication agent for AliveOS with explicit caller disclosure and Zenity-GTK3 styling"
+pkgdesc="Transparent Polkit authentication agent for AliveOS with explicit caller disclosure, UAC screen dimming, and Zenity-GTK3 styling"
 arch=('any')
 url="https://github.com/Twilight0/polkit-aliveos"
 license=('GPL-3.0-or-later')
-depends=('python' 'python-gobject' 'gtk3' 'polkit' 'libcanberra')
+depends=('python' 'python-gobject' 'gtk3' 'gtk-layer-shell' 'polkit' 'libcanberra')
 provides=('polkit-authentication-agent')
 conflicts=('polkit-gnome')
+source=("https://github.com/Twilight0/polkit-aliveos/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
 
 package() {
-  cd "${srcdir}/.."
+  cd "${srcdir}/${pkgname}-${pkgver}"
   
-  # Install executables
+  # Install authentication agent
   install -Dm755 polkit-aliveos "${pkgdir}/usr/lib/polkit-aliveos/polkit-aliveos"
-  install -Dm755 polkit-aliveos-config "${pkgdir}/usr/bin/polkit-aliveos-config"
 
-  # Symlink agent binary
+  # Install configuration companion utilities (GTK and Curses TUI)
+  install -Dm755 polkit-aliveos-config "${pkgdir}/usr/bin/polkit-aliveos-config"
+  install -Dm755 qpolkitconfig "${pkgdir}/usr/bin/qpolkitconfig"
+
+  # Symlink agent binary into /usr/bin
   install -d "${pkgdir}/usr/bin"
   ln -sf /usr/lib/polkit-aliveos/polkit-aliveos "${pkgdir}/usr/bin/polkit-aliveos"
 
