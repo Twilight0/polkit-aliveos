@@ -278,7 +278,40 @@ class AliveosPolkitListener(PolkitAgent.Listener):
 
         dialog.connect("response", on_response)
 
+def run_test_dialog():
+    cfg = load_config()
+    class DummyDetails:
+        def get_keys(self):
+            return ["program", "command_line"]
+        def lookup(self, key):
+            if key == "program":
+                return "/usr/bin/pacman"
+            elif key == "command_line":
+                return "/usr/bin/pacman -Syu --noconfirm"
+            return None
+
+    details = DummyDetails()
+    dialog = AuthDialog(
+        action_id="org.archlinux.pkexec.pacman",
+        message="System Update requires administrative privileges",
+        icon_name="system-software-update",
+        details=details,
+        users=[os.getlogin()],
+        cfg=cfg
+    )
+    dialog.lbl_prompt.set_text("Password for twilight:")
+    resp = dialog.run()
+    if resp == Gtk.ResponseType.OK:
+        print(f"[✓] Test completed. Entered password length: {len(dialog.entry_pass.get_text())} characters.")
+    else:
+        print("[✗] Test cancelled by user.")
+    dialog.destroy()
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--test", "-t", "test"):
+        run_test_dialog()
+        return
+
     # Register listener
     listener = AliveosPolkitListener()
     subject = Polkit.UnixSession.new_for_process_sync(os.getpid(), None)
