@@ -84,13 +84,13 @@ def create_dim_overlay():
 
     if HAS_LAYER_SHELL:
         GtkLayerShell.init_for_window(dimmer)
-        GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.TOP)
+        # BOTTOM layer places the dark overlay above wallpaper/tiled windows but behind floating windows & dialogs
+        GtkLayerShell.set_layer(dimmer, GtkLayerShell.Layer.BOTTOM)
         for edge in (GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT, GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.BOTTOM):
             GtkLayerShell.set_anchor(dimmer, edge, True)
         GtkLayerShell.set_keyboard_mode(dimmer, GtkLayerShell.KeyboardMode.NONE)
     else:
         dimmer.fullscreen()
-
     return dimmer
 
 class AuthDialog(Gtk.MessageDialog):
@@ -106,8 +106,8 @@ class AuthDialog(Gtk.MessageDialog):
         self.set_wmclass("polkit-aliveos", "polkit-aliveos")
         self.set_title("Authentication Required")
         self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_keep_above(True)
         self.set_default_response(Gtk.ResponseType.OK)
-
         self.cfg = cfg
         self.action_id = action_id
         self.users = users
