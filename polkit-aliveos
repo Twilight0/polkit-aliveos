@@ -79,12 +79,10 @@ class AuthDialog(Gtk.Dialog):
     def __init__(self, action_id, message, icon_name, details, users, cfg):
         super().__init__(
             title="Authentication Required",
-            flags=Gtk.DialogFlags.MODAL,
-            buttons=(
-                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-                "_Authenticate", Gtk.ResponseType.OK,
-            )
+            modal=True
         )
+        self.add_button(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL)
+        self.add_button("_Authenticate", Gtk.ResponseType.OK)
         self.set_default_size(480, -1)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.set_border_width(12)
@@ -120,7 +118,8 @@ class AuthDialog(Gtk.Dialog):
         
         # Zenity-style Dialog Icon
         icon_widget = Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG)
-        icon_widget.set_alignment(0.5, 0.0)
+        icon_widget.set_valign(Gtk.Align.START)
+        icon_widget.set_halign(Gtk.Align.CENTER)
         header_box.pack_start(icon_widget, False, False, 0)
 
         msg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -193,16 +192,14 @@ class AuthDialog(Gtk.Dialog):
         self.entry_pass.set_activates_default(True)
         entry_hbox.pack_start(self.entry_pass, True, True, 0)
 
-        # Password Reveal Button (Eye Icon)
+        # Password Reveal Button (Eye Icon with toggle & peek-on-hold)
         if self.cfg.get("reveal_password", True):
-            btn_reveal = Gtk.Button.new_from_icon_name("view-reveal-symbolic", Gtk.IconSize.BUTTON)
-            btn_reveal.set_tooltip_text("Show password")
-            btn_reveal.connect("toggled", self.on_reveal_toggled) if hasattr(btn_reveal, "connect") else None
-            # Use pressed/released for peek on hold
-            btn_reveal.connect("pressed", lambda b: self.entry_pass.set_visibility(True))
-            btn_reveal.connect("released", lambda b: self.entry_pass.set_visibility(False))
-            entry_hbox.pack_start(btn_reveal, False, False, 0)
-
+            self.btn_reveal = Gtk.ToggleButton()
+            img = Gtk.Image.new_from_icon_name("view-reveal-symbolic", Gtk.IconSize.BUTTON)
+            self.btn_reveal.set_image(img)
+            self.btn_reveal.set_tooltip_text("Show / hide password")
+            self.btn_reveal.connect("toggled", lambda b: self.entry_pass.set_visibility(b.get_active()))
+            entry_hbox.pack_start(self.btn_reveal, False, False, 0)
         pass_box.pack_start(entry_hbox, False, False, 0)
 
         # Error label (for incorrect password retry)
